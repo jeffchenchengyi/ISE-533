@@ -1,0 +1,381 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# ISE-533 Project 4: Allocation Problem for COVID-19 Ventilators\n",
+    "## Point Forecast - Deterministic Model\n",
+    "\n",
+    "By: Jacob Andreesen, Jeff Chen, Miao Xu, Yiyi Wang"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import os\n",
+    "import numpy as np\n",
+    "import pandas as pd\n",
+    "import math\n",
+    "from pyomo.environ import *\n",
+    "from collections import defaultdict\n",
+    "import pyomo.environ as pyo\n",
+    "from pyomo.opt import SolverFactory\n",
+    "from datetime import timedelta"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "raw = pd.read_csv('project 4 dataset/init_data.csv', header=0, index_col=0)\n",
+    "# raw.loc[51, 'StateCode'] = 'SNS'\n",
+    "# raw.loc[51, 'Available capacity'] = 12000\n",
+    "# raw.loc[51, 'nb_idx'] = str([i for i in range(51)])\n",
+    "raw"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "first_date = '2020/03/25'\n",
+    "t = 7\n",
+    "T = 14\n",
+    "P = 10\n",
+    "lbd = 0.1\n",
+    "\n",
+    "S = 51\n",
+    "states_name = raw['State']\n",
+    "SNS_stock = 12000\n",
+    "\n",
+    "init_ratio = 0.8\n",
+    "flow_bound_ratio = 0.3 #0.2\n",
+    "stock_bound_ratio = 0.5 #0.6"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#first iteration values\n",
+    "data = raw.rename(columns={'Available capacity': \"stock_self\"})\n",
+    "data = data[:-1]\n",
+    "data['stock_self'] = init_ratio * data['stock_self']\n",
+    "data['stock_nb'] = None\n",
+    "for i in range(S):\n",
+    "    data.loc[i, 'stock_nb'] = str([0 for _ in eval(data.loc[i, 'nb'])])\n",
+    "data['stock_sns'] = [0 for _ in range(S)]\n",
+    "data"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "idx = 0\n",
+    "flow_mapping = {}\n",
+    "flow_mapping_rev = {}\n",
+    "out_flow = defaultdict(list)\n",
+    "in_flow = defaultdict(list)\n",
+    "\n",
+    "for i in range(S):\n",
+    "    nbs = eval(data.iloc[i, 3])\n",
+    "    out_flow[i] = nbs\n",
+    "    for n in nbs:\n",
+    "        flow_mapping[(i, n)] = idx\n",
+    "        flow_mapping_rev[idx] = (i, n)\n",
+    "        in_flow[n].append(i)\n",
+    "        idx += 1\n",
+    "\n",
+    "in_flow[51] = []\n",
+    "out_flow[51] = list(range(51))\n",
+    "for n in range(S):\n",
+    "    flow_mapping[(51, n)] = idx\n",
+    "    flow_mapping_rev[idx] = (51, n)\n",
+    "    idx += 1"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "model = ConcreteModel()\n",
+    "\n",
+    "#Sets\n",
+    "F = idx\n",
+    "model.time_set = list(range(1, t + 1))\n",
+    "model.state_set = list(range(S))\n",
+    "model.state_p_set = list(range(S + 1))\n",
+    "model.flow_set = list(range(F))\n",
+    "model.flow_no_sns_set = list(range(F - S))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# instantiate Param\n",
+    "ini_self = [round(i) for i in data['stock_self']]\n",
+    "ini_nb = defaultdict(list)\n",
+    "for i in range(S):\n",
+    "    ini_nb[i] = eval(data.loc[i, 'stock_nb'])\n",
+    "ini_SNS = [round(i) for i in data['stock_sns']]\n",
+    "\n",
+    "# Parameters\n",
+    "model.demand = Param(model.state_set, model.time_set, within=NonNegativeReals, mutable=True)\n",
+    "\n",
+    "model.U = [round(flow_bound_ratio * ini_self[flow_mapping_rev[j][0]]) for j in model.flow_no_sns_set] + [round(flow_bound_ratio * init_ratio * SNS_stock) for _ in range(S)]\n",
+    "model.G = [round(stock_bound_ratio * i) for i in ini_self]"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Var\n",
+    "model.s0 = Var(model.state_p_set, within=NonNegativeReals)\n",
+    "model.s0_nb = Var(model.flow_set, within=NonNegativeReals)\n",
+    "model.x = Var(model.flow_set, within=NonNegativeReals)\n",
+    "model.delta = Var(model.state_set, model.time_set, within=NonNegativeReals)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#Constraints\n",
+    "model.stock_self = Constraint(model.state_set, rule=lambda model, j: model.s0[j] + sum(model.x[flow_mapping[(j, i)]] for i in out_flow[j]) == ini_self[j])\n",
+    "model.stock_SNS_self = Constraint(rule=lambda model: model.s0[51] + sum(model.x[flow_mapping[(51, i)]] for i in out_flow[51]) == init_ratio * SNS_stock)\n",
+    "\n",
+    "model.stock_nb = ConstraintList()\n",
+    "for j in model.state_set:\n",
+    "    for dum, i in enumerate(out_flow[j]):\n",
+    "        f = flow_mapping[(i, j)] \n",
+    "        model.stock_nb.add(model.s0_nb[f] - model.x[f] == ini_nb[j][dum])\n",
+    "    f = flow_mapping[(51, j)] \n",
+    "    model.stock_nb.add(model.s0_nb[f] - model.x[f] == ini_SNS[j])\n",
+    "        \n",
+    "model.delta_bound = ConstraintList()\n",
+    "for j in model.state_set:\n",
+    "    for tt in model.time_set:\n",
+    "        total_stock = model.s0[j] + model.s0_nb[flow_mapping[(51, j)] ] + sum(model.s0_nb[flow_mapping[(i, j)]] for i in out_flow[j])\n",
+    "        model.delta_bound.add(model.delta[j, tt] + total_stock >= model.demand[j, tt])\n",
+    "        \n",
+    "\n",
+    "model.s0_bound = Constraint(model.state_set, \\\n",
+    "                                  rule=lambda model, j: model.s0[j] >= model.G[j])\n",
+    "model.x_bound = Constraint(model.flow_set, \\\n",
+    "                                  rule=lambda model, j: model.x[j] <= model.U[j])"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#Objective\n",
+    "model.unmet = Expression(initialize=(sum(model.delta[s, tt] for s in model.state_set for tt in model.time_set)))\n",
+    "model.penalty = Expression(initialize=(sum(lbd*model.s0_nb[i] for i in model.flow_no_sns_set)))\n",
+    "model.obj = Objective(expr = model.unmet + model.penalty, sense = minimize)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### Solve Allocation Problem for 10 Weeks"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "for i in range(10):\n",
+    "    date = pd.to_datetime(first_date) + timedelta(7*i)\n",
+    "    print(\"date:\", date)\n",
+    "    for i in range(S):\n",
+    "        state = data.loc[i, 'State']\n",
+    "        df = pd.read_csv('project 4 dataset/prediction/{}/{}.csv'.format(date.strftime('%m%d'), state), header=0, index_col=0)\n",
+    "        for tt in range(t):\n",
+    "            model.demand[i, tt + 1].value = df.iloc[tt, 1]\n",
+    "    \n",
+    "    SolverFactory('glpk').solve(model) #.write()\n",
+    "\n",
+    "    data['stock_all'] = [0 for _ in range(S)] \n",
+    "    for i in model.state_set:\n",
+    "        data.loc[i, 'stock_self'] = round(model.s0[i].value)\n",
+    "        data.loc[i, 'stock_all'] += data.loc[i, 'stock_self']\n",
+    "\n",
+    "    for i in model.state_set:\n",
+    "        l = eval(data.loc[i, 'nb_idx'])\n",
+    "        new_nb = []\n",
+    "        for n in l:\n",
+    "            j = flow_mapping[(n, i)]\n",
+    "            new_nb.append(round(model.s0_nb[j].value))\n",
+    "        data.loc[i, 'stock_nb'] = str(new_nb)\n",
+    "        data.loc[i, 'stock_all'] += sum(new_nb)\n",
+    "\n",
+    "    for i in model.state_set:\n",
+    "        j = flow_mapping[(51, i)]\n",
+    "        data.loc[i, 'stock_sns'] = round(model.s0_nb[j].value)\n",
+    "        data.loc[i, 'stock_all'] += data.loc[i, 'stock_sns']\n",
+    "        \n",
+    "    data.to_csv(date.strftime('%m%d') + '.csv')"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### Compare results with actual demand"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "states_name = data['State']\n",
+    "state_demand = pd.DataFrame(columns=['date']) \n",
+    "\n",
+    "for j in range(S):\n",
+    "    state = states_name[j]\n",
+    "    temp = pd.read_csv(\"project 4 dataset/eval/{}.csv\".format(state), header=None)\n",
+    "    temp.rename(columns = {0: 'date', 1: state}, inplace = True)\n",
+    "    state_demand = state_demand.merge(temp, on='date', how='outer') \n",
+    "\n",
+    "state_demand = state_demand.set_index('date')\n",
+    "state_demand = state_demand.reset_index()\n",
+    "state_demand"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "scrolled": true
+   },
+   "outputs": [],
+   "source": [
+    "data_list = [states_name]\n",
+    "\n",
+    "for i in range(10):\n",
+    "    date = pd.to_datetime(first_date) + timedelta(7*i)\n",
+    "    stock = pd.read_csv(\"{}.csv\".format(date.strftime('%m%d')))\n",
+    "    #stock = stock.drop(['Unnamed: 0'], axis = 1)\n",
+    "    data_list.append(stock['stock_all'])\n",
+    "    \n",
+    "final = pd.concat(data_list, axis = 1)\n",
+    "#stock\n",
+    "final"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "eval = state_demand.groupby(np.arange(len(state_demand))//7).mean()\n",
+    "\n",
+    "final1 = final.transpose()\n",
+    "final1 = final1.iloc[1:]\n",
+    "final1.index = eval.index\n",
+    "final1.columns = states_name\n",
+    "final1"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "final_repeat = pd.DataFrame()\n",
+    "final_repeat = final1.loc[final1.index.repeat(7)].reset_index(drop=True)\n",
+    "final_repeat"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "unmet_everyday = state_demand.drop(['date'], axis = 1).subtract(final_repeat)\n",
+    "# unmet_everyday\n",
+    "unmet_everyday[unmet_everyday <= 0] = 0\n",
+    "unmet_everyweek = unmet_everyday.groupby(np.arange(len(unmet_everyday))//7).sum()\n",
+    "\n",
+    "unmet_everyweek"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "result = pd.DataFrame(unmet_everyweek.sum(axis = 1), columns = ['Unmet Demand'])\n",
+    "result.index = [1,2,3,4,5,6,7,8,9,10]\n",
+    "result = result.rename_axis('Week').reset_index()\n",
+    "#result.to_csv('project 4 dataset/result_det.csv')\n",
+    "result"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "pd.DataFrame(result.sum(axis = 1), columns = ['Unmet Demand']).sum(axis = 0)"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.7.1"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 2
+}
